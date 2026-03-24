@@ -26,6 +26,10 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Scraper output
+data/*
+!data/.gitkeep
+
 # Logs
 *.log
 npm-debug.log*
