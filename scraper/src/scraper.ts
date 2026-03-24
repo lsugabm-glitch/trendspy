@@ -1,9 +1,13 @@
-import { chromium } from "playwright";
+import { chromium } from "playwright-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
+
+chromium.use(StealthPlugin());
 import * as fs from "fs";
 import * as path from "path";
 
 const TARGET_URL = "https://www.tiktok.com/tag/skincare";
 const OUTPUT_PATH = path.resolve(__dirname, "../../data/videos.json");
+const SESSION_PATH = path.resolve(__dirname, "../../data/storageState.json");
 const SCROLL_TIMES = 5;
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -29,13 +33,27 @@ function extractHashtags(text: string): string[] {
 
 async function scrape(): Promise<void> {
   console.log("Launching Chromium...");
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath: require("playwright").chromium.executablePath(),
+  });
+
+  const hasSession = fs.existsSync(SESSION_PATH);
+  if (hasSession) {
+    console.log("Found saved session — loading cookies from storageState.json");
+  } else {
+    console.warn(
+      "No saved session found. Run `npx ts-node src/login.ts` first to log in.\n" +
+        "Continuing without a session (video grid may not load)."
+    );
+  }
 
   const context = await browser.newContext({
     userAgent: USER_AGENT,
     viewport: { width: 1280, height: 900 },
     locale: "en-US",
     timezoneId: "America/New_York",
+    ...(hasSession ? { storageState: SESSION_PATH } : {}),
   });
 
   const page = await context.newPage();
@@ -54,12 +72,32 @@ async function scrape(): Promise<void> {
     console.log("  Selector [data-e2e=challenge-item] not found — will try after scrolling.");
   });
 
+  // Screenshot after initial load for debugging
+  await page.screenshot({ path: path.resolve(__dirname, "../../data/debug-initial.png"), fullPage: false });
+  console.log("Screenshot saved: data/debug-initial.png");
+
+  // Log the page title and URL so we can detect redirects/CAPTCHAs
+  console.log(`  Page title: ${await page.title()}`);
+  console.log(`  Page URL:   ${page.url()}`);
+
   // Scroll to load more videos
   for (let i = 1; i <= SCROLL_TIMES; i++) {
     console.log(`Scroll ${i}/${SCROLL_TIMES}...`);
     await page.evaluate(() => window.scrollBy({ top: 1200, behavior: "smooth" }));
     await randomDelay(1000, 3000);
   }
+
+  // Screenshot after scrolling
+  await page.screenshot({ path: path.resolve(__dirname, "../../data/debug-after-scroll.png"), fullPage: false });
+  console.log("Screenshot saved: data/debug-after-scroll.png");
+
+  // Dump all data-e2e attribute values present on the page to find the right selectors
+  const e2eAttrs: string[] = await page.evaluate(() =>
+    [...new Set(
+      Array.from(document.querySelectorAll("[data-e2e]")).map((el) => el.getAttribute("data-e2e") ?? "")
+    )]
+  );
+  console.log("data-e2e values on page:", e2eAttrs);
 
   console.log("Extracting video data...");
 
@@ -110,7 +148,7 @@ async function scrape(): Promise<void> {
 
       // --- Hashtags from caption ---
       const hashtagMatches = caption.match(/#[\w\u00C0-\u024F\u4e00-\u9fff]+/g);
-      const hashtags = hashtagMatches ? [...new Set(hashtagMatches)] : [];
+      const hashtags: string[] = hashtagMatches ? [...new Set(hashtagMatches)] : [];
 
       if (url) {
         results.push({ url, caption, viewCount, username, hashtags });
