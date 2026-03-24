@@ -1,0 +1,19 @@
+{
+  "name": "@trendspy/scraper",
+  "version": "1.0.0",
+  "description": "TikTok trend scraper using Playwright",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "playwright": "^1.43.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5",
+    "@types/node": "^20.12.7",
+    "ts-node": "^10.9.2"
+  }
+}
