@@ -38,16 +38,19 @@ def run_actor(client: ApifyClient, search_type: str, query: str, max_items: int)
     if search_type == "hashtag":
         actor_input = {
             "hashtags": [query.lstrip("#")],
+            "resultsPerPage": max_items,
             "maxItems": max_items,
         }
     elif search_type == "profile":
         actor_input = {
             "profiles": [query.lstrip("@")],
+            "resultsPerPage": max_items,
             "maxItems": max_items,
         }
     else:
         actor_input = {
             "hashtags": [query],
+            "resultsPerPage": max_items,
             "maxItems": max_items,
         }
 
@@ -55,8 +58,18 @@ def run_actor(client: ApifyClient, search_type: str, query: str, max_items: int)
     print(f"[scrape] Actor input sent to {ACTOR_ID}:")
     print(json.dumps(actor_input, indent=2, ensure_ascii=False))
 
-    run = client.actor(ACTOR_ID).call(run_input=actor_input)
-    items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+    run = client.actor(ACTOR_ID).call(
+        run_input=actor_input,
+        timeout_secs=120,
+        memory_mbytes=1024,
+        wait_secs=60,
+    )
+
+    dataset = client.dataset(run["defaultDatasetId"])
+    dataset_info = dataset.get()
+    print(f"[scrape] Dataset item count (before iterate): {dataset_info.get('itemCount', 'unknown')}")
+
+    items = list(dataset.iterate_items())
 
     print(f"[scrape] Raw items returned by Apify: {len(items)}")
 
