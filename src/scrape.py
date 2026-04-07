@@ -51,22 +51,41 @@ def run_actor(client: ApifyClient, search_type: str, query: str, max_items: int)
             "maxItems": max_items,
         }
 
-    print(f"  Running actor for {search_type}={query!r} (max {max_items} videos)...")
+    print(f"\n[scrape] ── {search_type.upper()} query: {query!r}")
+    print(f"[scrape] Actor input sent to {ACTOR_ID}:")
+    print(json.dumps(actor_input, indent=2, ensure_ascii=False))
+
     run = client.actor(ACTOR_ID).call(run_input=actor_input)
     items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
-    print(f"  Retrieved {len(items)} videos.")
+
+    print(f"[scrape] Raw items returned by Apify: {len(items)}")
+
+    if len(items) == 0:
+        raise RuntimeError(
+            f"Apify returned 0 results for {search_type}={query!r}. "
+            "Possible causes: wrong input format, API token invalid, "
+            "actor quota exhausted, or this keyword has no TikTok results."
+        )
+
+    # Print first item so field names are visible in CI logs
+    print(f"[scrape] First raw item (field names + values):")
+    print(json.dumps(items[0], indent=2, ensure_ascii=False, default=str))
+
     return items
 
 
-def filter_by_period(items: list[dict], period_days: int) -> list[dict]:
+def filter_by_period(items: list[dict], period_days: int, query: str) -> list[dict]:
     """Drop videos posted before the period_days cutoff (client-side filter)."""
     if period_days <= 0:
         return items
     cutoff = datetime.now(tz=timezone.utc) - timedelta(days=period_days)
     kept = []
+    no_timestamp = 0
+    too_old = 0
     for v in items:
         raw = v.get("createTimeISO") or v.get("createTime")
         if raw is None:
+            no_timestamp += 1
             kept.append(v)  # no timestamp — keep rather than silently discard
             continue
         if isinstance(raw, (int, float)):
@@ -75,10 +94,19 @@ def filter_by_period(items: list[dict], period_days: int) -> list[dict]:
             try:
                 created = datetime.fromisoformat(str(raw).rstrip("Z")).replace(tzinfo=timezone.utc)
             except ValueError:
+                no_timestamp += 1
                 kept.append(v)
                 continue
         if created >= cutoff:
             kept.append(v)
+        else:
+            too_old += 1
+
+    print(
+        f"[scrape] Date filter ({period_days}d cutoff: {cutoff.date()}) for {query!r}: "
+        f"{len(items)} in → {len(kept)} kept "
+        f"({too_old} too old, {no_timestamp} no timestamp)"
+    )
     return kept
 
 
@@ -115,7 +143,7 @@ def scrape(
     for kw in keywords:
         slug = kw.replace(" ", "_")
         items = run_actor(client, "keyword", kw, max_videos)
-        items = filter_by_period(items, period_days)
+        items = filter_by_period(items, period_days, kw)
         raw_path = DATA_DIR / f"raw_keyword_{slug}_{timestamp}.json"
         raw_path.write_text(json.dumps(items, indent=2, ensure_ascii=False))
         for item in items:
@@ -126,7 +154,7 @@ def scrape(
     for ht in hashtags:
         slug = ht.lstrip("#")
         items = run_actor(client, "hashtag", ht, max_videos)
-        items = filter_by_period(items, period_days)
+        items = filter_by_period(items, period_days, ht)
         raw_path = DATA_DIR / f"raw_hashtag_{slug}_{timestamp}.json"
         raw_path.write_text(json.dumps(items, indent=2, ensure_ascii=False))
         for item in items:
@@ -137,7 +165,7 @@ def scrape(
     for profile in profiles:
         slug = profile.lstrip("@")
         items = run_actor(client, "profile", profile, max_videos)
-        items = filter_by_period(items, period_days)
+        items = filter_by_period(items, period_days, profile)
         raw_path = DATA_DIR / f"raw_profile_{slug}_{timestamp}.json"
         raw_path.write_text(json.dumps(items, indent=2, ensure_ascii=False))
         for item in items:
