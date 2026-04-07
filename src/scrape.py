@@ -12,8 +12,7 @@ Required env vars:
 import json
 import os
 import sys
-import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from apify_client import ApifyClient
@@ -34,24 +33,21 @@ def load_config() -> dict:
         return json.load(f)
 
 
-def run_actor(client: ApifyClient, search_type: str, query: str, max_items: int, period_days: int) -> list[dict]:
+def run_actor(client: ApifyClient, search_type: str, query: str, max_items: int) -> list[dict]:
     """Run the Apify TikTok scraper actor and return the dataset items."""
     if search_type == "hashtag":
         actor_input = {
             "hashtags": [query.lstrip("#")],
-            "resultsPerPage": max_items,
             "maxItems": max_items,
         }
     elif search_type == "profile":
         actor_input = {
             "profiles": [query.lstrip("@")],
-            "resultsPerPage": max_items,
             "maxItems": max_items,
         }
     else:
         actor_input = {
-            "searchQueries": [query],
-            "resultsPerPage": max_items,
+            "search": query,
             "maxItems": max_items,
         }
 
@@ -60,6 +56,30 @@ def run_actor(client: ApifyClient, search_type: str, query: str, max_items: int,
     items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
     print(f"  Retrieved {len(items)} videos.")
     return items
+
+
+def filter_by_period(items: list[dict], period_days: int) -> list[dict]:
+    """Drop videos posted before the period_days cutoff (client-side filter)."""
+    if period_days <= 0:
+        return items
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=period_days)
+    kept = []
+    for v in items:
+        raw = v.get("createTimeISO") or v.get("createTime")
+        if raw is None:
+            kept.append(v)  # no timestamp — keep rather than silently discard
+            continue
+        if isinstance(raw, (int, float)):
+            created = datetime.fromtimestamp(raw, tz=timezone.utc)
+        else:
+            try:
+                created = datetime.fromisoformat(str(raw).rstrip("Z")).replace(tzinfo=timezone.utc)
+            except ValueError:
+                kept.append(v)
+                continue
+        if created >= cutoff:
+            kept.append(v)
+    return kept
 
 
 def scrape(
@@ -94,7 +114,8 @@ def scrape(
 
     for kw in keywords:
         slug = kw.replace(" ", "_")
-        items = run_actor(client, "keyword", kw, max_videos, period_days)
+        items = run_actor(client, "keyword", kw, max_videos)
+        items = filter_by_period(items, period_days)
         raw_path = DATA_DIR / f"raw_keyword_{slug}_{timestamp}.json"
         raw_path.write_text(json.dumps(items, indent=2, ensure_ascii=False))
         for item in items:
@@ -104,7 +125,8 @@ def scrape(
 
     for ht in hashtags:
         slug = ht.lstrip("#")
-        items = run_actor(client, "hashtag", ht, max_videos, period_days)
+        items = run_actor(client, "hashtag", ht, max_videos)
+        items = filter_by_period(items, period_days)
         raw_path = DATA_DIR / f"raw_hashtag_{slug}_{timestamp}.json"
         raw_path.write_text(json.dumps(items, indent=2, ensure_ascii=False))
         for item in items:
@@ -114,7 +136,8 @@ def scrape(
 
     for profile in profiles:
         slug = profile.lstrip("@")
-        items = run_actor(client, "profile", profile, max_videos, period_days)
+        items = run_actor(client, "profile", profile, max_videos)
+        items = filter_by_period(items, period_days)
         raw_path = DATA_DIR / f"raw_profile_{slug}_{timestamp}.json"
         raw_path.write_text(json.dumps(items, indent=2, ensure_ascii=False))
         for item in items:
