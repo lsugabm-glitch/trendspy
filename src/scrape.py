@@ -47,7 +47,7 @@ def run_actor(client: ApifyClient, search_type: str, query: str, max_items: int)
         }
     else:
         actor_input = {
-            "search": [query],
+            "hashtags": [query],
             "maxItems": max_items,
         }
 
