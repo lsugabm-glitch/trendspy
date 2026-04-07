@@ -1,4 +1,0 @@
-openai-whisper
-chromadb
-openai
-yt-dlp

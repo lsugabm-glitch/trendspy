@@ -1,0 +1,90 @@
+name: On-Demand TikTok Research
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: "Keyword, #hashtag, or @profile to research"
+        required: true
+        type: string
+      mode:
+        description: "Search mode"
+        required: true
+        type: choice
+        options:
+          - keyword
+          - hashtag
+          - profile
+        default: keyword
+      period_days:
+        description: "Days of data to retrieve"
+        required: true
+        type: choice
+        options:
+          - "7"
+          - "14"
+          - "30"
+        default: "7"
+      max_videos:
+        description: "Max videos per query"
+        required: true
+        type: choice
+        options:
+          - "100"
+          - "200"
+          - "300"
+          - "500"
+        default: "200"
+
+permissions:
+  contents: write
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create data directory
+        run: mkdir -p data
+
+      - name: Scrape TikTok data via Apify
+        env:
+          APIFY_API_TOKEN: ${{ secrets.APIFY_API_TOKEN }}
+        run: |
+          python src/scrape.py \
+            --query "${{ github.event.inputs.query }}" \
+            --mode "${{ github.event.inputs.mode }}" \
+            --period_days "${{ github.event.inputs.period_days }}" \
+            --max_videos "${{ github.event.inputs.max_videos }}"
+
+      - name: Analyze metrics
+        run: python src/analyze.py
+
+      - name: Generate AI insights
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python src/insights.py
+
+      - name: Build HTML report
+        run: python src/report.py
+
+      - name: Commit and push report to GitHub Pages
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/index.html
+          git diff --staged --quiet || git commit -m "chore: on-demand report — ${{ github.event.inputs.mode }}=${{ github.event.inputs.query }} [skip ci]"
+          git push
