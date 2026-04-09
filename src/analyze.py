@@ -3,9 +3,14 @@ analyze.py — Compute engagement metrics and aggregate TikTok video data.
 
 Reads the latest combined_*.json from data/, enriches each video with
 derived metrics, and writes an analyzed_*.json with aggregated summaries.
+
+Usage:
+    python src/analyze.py                     # multi-report mode (reads config)
+    python src/analyze.py --slug on_demand    # single slug mode
 """
 
 import json
+import re
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -13,12 +18,36 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
+CONFIG_PATH = ROOT / "config" / "keywords.json"
 
 
-def latest_combined() -> Path:
-    files = sorted(DATA_DIR.glob("combined_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+def slugify(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+def load_config() -> dict:
+    with open(CONFIG_PATH) as f:
+        return json.load(f)
+
+
+def get_reports(config: dict) -> list[dict]:
+    """Return list of report configs from either new or legacy format."""
+    if "reports" in config:
+        return config["reports"]
+    return [{
+        "name": "default",
+        "keywords": config.get("keywords", []),
+        "hashtags": config.get("hashtags", []),
+        "profiles": config.get("profiles", []),
+        "max_videos_per_keyword": config.get("max_videos_per_keyword", 300),
+        "period_days": config.get("period_days", 7),
+    }]
+
+
+def latest(pattern: str) -> Path:
+    files = sorted(DATA_DIR.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
-        print("ERROR: No combined_*.json found in data/. Run scrape.py first.", file=sys.stderr)
+        print(f"ERROR: No {pattern} found in data/. Run scrape.py first.", file=sys.stderr)
         sys.exit(1)
     return files[0]
 
@@ -77,29 +106,6 @@ def enrich(video: dict) -> dict:
     return video
 
 
-def assign_tiers(videos: list[dict]) -> list[dict]:
-    """Label each video with a performance tier based on view count percentile."""
-    sorted_views = sorted((v["_views"] for v in videos), reverse=True)
-    n = len(sorted_views)
-    if n == 0:
-        return videos
-    top10 = sorted_views[max(0, int(n * 0.10) - 1)]
-    top30 = sorted_views[max(0, int(n * 0.30) - 1)]
-    top70 = sorted_views[max(0, int(n * 0.70) - 1)]
-
-    for v in videos:
-        views = v["_views"]
-        if views >= top10:
-            v["_tier"] = "viral"
-        elif views >= top30:
-            v["_tier"] = "strong"
-        elif views >= top70:
-            v["_tier"] = "average"
-        else:
-            v["_tier"] = "weak"
-    return videos
-
-
 def extract_hashtags(video: dict) -> list[str]:
     tags = video.get("hashtags") or video.get("textExtra") or []
     if isinstance(tags, list):
@@ -130,9 +136,48 @@ def video_caption(video: dict) -> str:
     return video.get("text") or video.get("desc") or video.get("caption") or ""
 
 
-def analyze() -> Path:
-    src = latest_combined()
-    print(f"Analyzing {src.name}...")
+def summarize(v: dict) -> dict:
+    return {
+        "url": video_url(v),
+        "caption": video_caption(v)[:200],
+        "creator": creator_name(v),
+        "views": v["_views"],
+        "likes": v["_likes"],
+        "comments": v["_comments"],
+        "shares": v["_shares"],
+        "total_engagement": v["_total_engagement"],
+        "engagement_rate": v["_engagement_rate"],
+        "engagement_velocity": v["_engagement_velocity"],
+        "source_type": v.get("_source_type"),
+        "source_query": v.get("_source_query"),
+    }
+
+
+def compute_benchmarks(videos: list[dict]) -> dict:
+    if not videos:
+        return {}
+
+    top_views = max(videos, key=lambda v: v["_views"])
+    velocity_videos = [v for v in videos if v["_engagement_velocity"] is not None]
+    top_velocity = max(velocity_videos, key=lambda v: v["_engagement_velocity"]) if velocity_videos else top_views
+    top_er = max(videos, key=lambda v: v["_engagement_rate"])
+
+    return {
+        "top_video_by_views": summarize(top_views),
+        "top_video_by_velocity": summarize(top_velocity),
+        "top_video_by_er": summarize(top_er),
+        "benchmark_targets": {
+            "views_to_beat": round(top_views["_views"] * 1.2),
+            "er_to_beat": round(top_er["_engagement_rate"] * 1.1, 4),
+            "velocity_to_beat": round(top_velocity["_engagement_velocity"] * 1.1, 4) if top_velocity["_engagement_velocity"] else None,
+        },
+    }
+
+
+def analyze(slug: str) -> Path:
+    """Analyze combined data for a specific report slug."""
+    src = latest(f"combined_{slug}_*.json")
+    print(f"Analyzing {src.name} (slug={slug})...")
     videos: list[dict] = json.loads(src.read_text())
 
     if not videos:
@@ -140,7 +185,6 @@ def analyze() -> Path:
         sys.exit(1)
 
     videos = [enrich(v) for v in videos]
-    videos = assign_tiers(videos)
 
     # --- Top 10 lists ---
     by_views = sorted(videos, key=lambda v: v["_views"], reverse=True)[:10]
@@ -151,22 +195,8 @@ def analyze() -> Path:
     )[:10]
     by_engagement = sorted(videos, key=lambda v: v["_total_engagement"], reverse=True)[:10]
 
-    def summarize(v: dict) -> dict:
-        return {
-            "url": video_url(v),
-            "caption": video_caption(v)[:200],
-            "creator": creator_name(v),
-            "views": v["_views"],
-            "likes": v["_likes"],
-            "comments": v["_comments"],
-            "shares": v["_shares"],
-            "total_engagement": v["_total_engagement"],
-            "engagement_rate": v["_engagement_rate"],
-            "engagement_velocity": v["_engagement_velocity"],
-            "tier": v["_tier"],
-            "source_type": v.get("_source_type"),
-            "source_query": v.get("_source_query"),
-        }
+    # --- Benchmarks ---
+    benchmarks = compute_benchmarks(videos)
 
     # --- Top creators ---
     creator_views: dict[str, int] = defaultdict(int)
@@ -203,8 +233,10 @@ def analyze() -> Path:
         })
     keyword_performance.sort(key=lambda x: x["performance_score"], reverse=True)
 
-    # --- Trending hashtags in high-performing videos ---
-    high_perf = [v for v in videos if v["_tier"] in ("viral", "strong")]
+    # --- Trending hashtags in top 30% of videos by views ---
+    sorted_all = sorted(videos, key=lambda v: v["_views"], reverse=True)
+    top30_count = max(1, int(len(sorted_all) * 0.30))
+    high_perf = sorted_all[:top30_count]
     hashtag_counter: Counter = Counter()
     for v in high_perf:
         for tag in extract_hashtags(v):
@@ -212,7 +244,6 @@ def analyze() -> Path:
     trending_hashtags = [{"hashtag": tag, "count": cnt} for tag, cnt in hashtag_counter.most_common(30)]
 
     # --- Summary stats ---
-    tier_counts = Counter(v["_tier"] for v in videos)
     total_views = sum(v["_views"] for v in videos)
 
     result = {
@@ -221,8 +252,9 @@ def analyze() -> Path:
             "analyzed_at": datetime.utcnow().isoformat(),
             "total_videos": len(videos),
             "total_views": total_views,
-            "tier_breakdown": dict(tier_counts),
+            "report_slug": slug,
         },
+        "benchmarks": benchmarks,
         "top_by_views": [summarize(v) for v in by_views],
         "top_by_engagement_velocity": [summarize(v) for v in by_velocity],
         "top_by_total_engagement": [summarize(v) for v in by_engagement],
@@ -232,11 +264,31 @@ def analyze() -> Path:
     }
 
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    out_path = DATA_DIR / f"analyzed_{timestamp}.json"
+    out_path = DATA_DIR / f"analyzed_{slug}_{timestamp}.json"
     out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
     print(f"Saved analysis → {out_path}")
     return out_path
 
 
+def analyze_all() -> list[Path]:
+    """Analyze all reports from config."""
+    config = load_config()
+    reports = get_reports(config)
+    paths = []
+    for report in reports:
+        slug = slugify(report["name"])
+        paths.append(analyze(slug))
+    return paths
+
+
 if __name__ == "__main__":
-    analyze()
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--slug", default=None, help="Report slug to analyze (single-report mode)")
+    args = parser.parse_args()
+
+    if args.slug:
+        analyze(args.slug)
+    else:
+        analyze_all()

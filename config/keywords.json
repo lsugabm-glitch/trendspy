@@ -1,15 +1,20 @@
 {
-  "keywords": [
-    "skincare routine",
-    "gym supplement",
-    "produktivitas"
-  ],
-  "hashtags": [
-    "#skincareroutine",
-    "#gymtok",
-    "#kontenkreator"
-  ],
-  "profiles": [],
-  "max_videos_per_keyword": 300,
-  "period_days": 7
+  "reports": [
+    {
+      "name": "Skincare Indonesia",
+      "keywords": ["skincare routine", "skincare"],
+      "hashtags": ["skincareindonesia", "skincarerutine"],
+      "profiles": [],
+      "max_videos_per_keyword": 300,
+      "period_days": 14
+    },
+    {
+      "name": "Gym & Fitness",
+      "keywords": ["gym workout", "fitness"],
+      "hashtags": ["gymtok", "fitnessindonesia"],
+      "profiles": [],
+      "max_videos_per_keyword": 300,
+      "period_days": 14
+    }
+  ]
 }

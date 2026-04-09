@@ -5,12 +5,17 @@ Reads keywords/hashtags from config/keywords.json, runs the
 clockworks/tiktok-scraper actor for each, and saves raw + combined JSON
 to the data/ directory.
 
+Usage:
+    python src/scrape.py                                         # multi-report mode
+    python src/scrape.py --query "#hashtag" --mode hashtag       # on-demand single query
+
 Required env vars:
     APIFY_API_TOKEN
 """
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -28,9 +33,27 @@ DATA_DIR.mkdir(exist_ok=True)
 ACTOR_ID = "clockworks/tiktok-scraper"
 
 
+def slugify(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
 def load_config() -> dict:
     with open(CONFIG_PATH) as f:
         return json.load(f)
+
+
+def get_reports(config: dict) -> list[dict]:
+    """Return list of report configs from either new or legacy format."""
+    if "reports" in config:
+        return config["reports"]
+    return [{
+        "name": "default",
+        "keywords": config.get("keywords", []),
+        "hashtags": config.get("hashtags", []),
+        "profiles": config.get("profiles", []),
+        "max_videos_per_keyword": config.get("max_videos_per_keyword", 300),
+        "period_days": config.get("period_days", 7),
+    }]
 
 
 def run_actor(client: ApifyClient, search_type: str, query: str, max_items: int) -> list[dict]:
@@ -80,7 +103,6 @@ def run_actor(client: ApifyClient, search_type: str, query: str, max_items: int)
             "actor quota exhausted, or this keyword has no TikTok results."
         )
 
-    # Print first item so field names are visible in CI logs
     print(f"[scrape] First raw item (field names + values):")
     print(json.dumps(items[0], indent=2, ensure_ascii=False, default=str))
 
@@ -99,7 +121,7 @@ def filter_by_period(items: list[dict], period_days: int, query: str) -> list[di
         raw = v.get("createTimeISO") or v.get("createTime")
         if raw is None:
             no_timestamp += 1
-            kept.append(v)  # no timestamp — keep rather than silently discard
+            kept.append(v)
             continue
         if isinstance(raw, (int, float)):
             created = datetime.fromtimestamp(raw, tz=timezone.utc)
@@ -123,41 +145,22 @@ def filter_by_period(items: list[dict], period_days: int, query: str) -> list[di
     return kept
 
 
-def scrape(
-    keywords: list[str] | None = None,
-    hashtags: list[str] | None = None,
-    profiles: list[str] | None = None,
-    max_videos: int | None = None,
-    period_days: int | None = None,
-) -> Path:
-    """
-    Main scrape entry point.
+def scrape_report(client: ApifyClient, report_cfg: dict, timestamp: str) -> Path:
+    """Scrape a single report config and return the combined file path."""
+    slug = slugify(report_cfg["name"])
+    keywords = report_cfg.get("keywords", [])
+    hashtags = report_cfg.get("hashtags", [])
+    profiles = report_cfg.get("profiles", [])
+    max_videos = report_cfg.get("max_videos_per_keyword", 300)
+    period_days = report_cfg.get("period_days", 7)
 
-    When called with explicit arguments (on-demand mode) those values override
-    config/keywords.json.  Called with no arguments it reads from the config
-    file (scheduled mode).
-    """
-    api_token = os.environ.get("APIFY_API_TOKEN")
-    if not api_token:
-        print("ERROR: APIFY_API_TOKEN not set.", file=sys.stderr)
-        sys.exit(1)
-
-    config = load_config()
-    keywords = keywords if keywords is not None else config["keywords"]
-    hashtags = hashtags if hashtags is not None else config["hashtags"]
-    profiles = profiles if profiles is not None else config["profiles"]
-    max_videos = max_videos if max_videos is not None else config["max_videos_per_keyword"]
-    period_days = period_days if period_days is not None else config["period_days"]
-
-    client = ApifyClient(api_token)
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     all_videos: list[dict] = []
 
     for kw in keywords:
-        slug = kw.replace(" ", "_")
+        kw_slug = kw.replace(" ", "_")
         items = run_actor(client, "keyword", kw, max_videos)
         items = filter_by_period(items, period_days, kw)
-        raw_path = DATA_DIR / f"raw_keyword_{slug}_{timestamp}.json"
+        raw_path = DATA_DIR / f"raw_keyword_{slug}_{kw_slug}_{timestamp}.json"
         raw_path.write_text(json.dumps(items, indent=2, ensure_ascii=False))
         for item in items:
             item["_source_type"] = "keyword"
@@ -165,10 +168,10 @@ def scrape(
         all_videos.extend(items)
 
     for ht in hashtags:
-        slug = ht.lstrip("#")
+        ht_slug = ht.lstrip("#")
         items = run_actor(client, "hashtag", ht, max_videos)
         items = filter_by_period(items, period_days, ht)
-        raw_path = DATA_DIR / f"raw_hashtag_{slug}_{timestamp}.json"
+        raw_path = DATA_DIR / f"raw_hashtag_{slug}_{ht_slug}_{timestamp}.json"
         raw_path.write_text(json.dumps(items, indent=2, ensure_ascii=False))
         for item in items:
             item["_source_type"] = "hashtag"
@@ -176,17 +179,17 @@ def scrape(
         all_videos.extend(items)
 
     for profile in profiles:
-        slug = profile.lstrip("@")
+        profile_slug = profile.lstrip("@")
         items = run_actor(client, "profile", profile, max_videos)
         items = filter_by_period(items, period_days, profile)
-        raw_path = DATA_DIR / f"raw_profile_{slug}_{timestamp}.json"
+        raw_path = DATA_DIR / f"raw_profile_{slug}_{profile_slug}_{timestamp}.json"
         raw_path.write_text(json.dumps(items, indent=2, ensure_ascii=False))
         for item in items:
             item["_source_type"] = "profile"
             item["_source_query"] = profile
         all_videos.extend(items)
 
-    # Deduplicate by video ID (keep first occurrence)
+    # Deduplicate by video ID
     seen: set[str] = set()
     unique_videos: list[dict] = []
     for v in all_videos:
@@ -195,15 +198,66 @@ def scrape(
             seen.add(vid)
             unique_videos.append(v)
 
-    combined_path = DATA_DIR / f"combined_{timestamp}.json"
+    combined_path = DATA_DIR / f"combined_{slug}_{timestamp}.json"
     combined_path.write_text(json.dumps(unique_videos, indent=2, ensure_ascii=False))
     print(f"\nSaved {len(unique_videos)} unique videos → {combined_path}")
     return combined_path
 
 
+def scrape_all() -> list[Path]:
+    """Scrape all reports from config (scheduled mode)."""
+    api_token = os.environ.get("APIFY_API_TOKEN")
+    if not api_token:
+        print("ERROR: APIFY_API_TOKEN not set.", file=sys.stderr)
+        sys.exit(1)
+
+    config = load_config()
+    reports = get_reports(config)
+    client = ApifyClient(api_token)
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+    paths = []
+    for report in reports:
+        path = scrape_report(client, report, timestamp)
+        paths.append(path)
+    return paths
+
+
+def scrape_single(query: str, mode: str, period_days: int | None, max_videos: int | None) -> Path:
+    """Scrape a single on-demand query. Writes combined_on_demand_*.json."""
+    api_token = os.environ.get("APIFY_API_TOKEN")
+    if not api_token:
+        print("ERROR: APIFY_API_TOKEN not set.", file=sys.stderr)
+        sys.exit(1)
+
+    config = load_config()
+    reports = get_reports(config)
+    default_report = reports[0] if reports else {}
+    if max_videos is None:
+        max_videos = default_report.get("max_videos_per_keyword", 300)
+    if period_days is None:
+        period_days = default_report.get("period_days", 7)
+
+    client = ApifyClient(api_token)
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+    items = run_actor(client, mode, query, max_videos)
+    items = filter_by_period(items, period_days, query)
+    for item in items:
+        item["_source_type"] = mode
+        item["_source_query"] = query
+
+    query_slug = re.sub(r"[^a-z0-9]+", "_", query.lower().lstrip("#@")).strip("_")
+    raw_path = DATA_DIR / f"raw_{mode}_{query_slug}_{timestamp}.json"
+    raw_path.write_text(json.dumps(items, indent=2, ensure_ascii=False))
+
+    combined_path = DATA_DIR / f"combined_on_demand_{timestamp}.json"
+    combined_path.write_text(json.dumps(items, indent=2, ensure_ascii=False))
+    print(f"\nSaved {len(items)} videos → {combined_path}")
+    return combined_path
+
+
 if __name__ == "__main__":
-    # Support optional CLI overrides for on-demand workflow:
-    # python scrape.py --query "#hashtag" --mode hashtag --period_days 14 --max_videos 200
     import argparse
 
     parser = argparse.ArgumentParser()
@@ -214,11 +268,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.query:
-        if args.mode == "hashtag":
-            scrape(keywords=[], hashtags=[args.query], profiles=[], max_videos=args.max_videos, period_days=args.period_days)
-        elif args.mode == "profile":
-            scrape(keywords=[], hashtags=[], profiles=[args.query], max_videos=args.max_videos, period_days=args.period_days)
-        else:
-            scrape(keywords=[args.query], hashtags=[], profiles=[], max_videos=args.max_videos, period_days=args.period_days)
+        scrape_single(args.query, args.mode, args.period_days, args.max_videos)
     else:
-        scrape()
+        scrape_all()
