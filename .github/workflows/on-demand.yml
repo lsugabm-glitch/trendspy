@@ -71,15 +71,15 @@ jobs:
             --max_videos "${{ github.event.inputs.max_videos }}"
 
       - name: Analyze metrics
-        run: python src/analyze.py
+        run: python src/analyze.py --slug on_demand
 
       - name: Generate AI insights
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python src/insights.py
+        run: python src/insights.py --slug on_demand
 
       - name: Build HTML report
-        run: python src/report.py
+        run: python src/report.py --slug on_demand
 
       - name: Commit and push report to GitHub Pages
         run: |
