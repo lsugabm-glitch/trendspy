@@ -1,0 +1,50 @@
+name: 📰 News Brief
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: "URL artikel (pisah dengan koma)"
+        required: true
+        type: string
+      topic:
+        description: "Label topik (contoh: skincare, gym, viral)"
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  generate-brief:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate news brief
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python src/news_brief.py \
+            --urls "${{ github.event.inputs.urls }}" \
+            --topic "${{ github.event.inputs.topic }}"
+
+      - name: Commit report
+        run: |
+          git config user.name "trendspy-bot"
+          git config user.email "actions@trendspy"
+          git add reports/
+          git diff --staged --quiet || \
+            git commit -m "news brief: ${{ github.event.inputs.topic || 'update' }} ($(date +'%Y-%m-%d'))"
+          git push
