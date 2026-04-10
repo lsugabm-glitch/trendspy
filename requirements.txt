@@ -3,3 +3,4 @@ apify-client
 python-dotenv
 requests
 jinja2
+beautifulsoup4
