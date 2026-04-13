@@ -1,54 +1,57 @@
-name: On-Demand TikTok Research
+name: 🔍 On-Demand TikTok Research
 
 on:
   workflow_dispatch:
     inputs:
       query:
-        description: "Keyword, #hashtag, or @profile to research"
+        description: "Keyword, #hashtag, atau @profile"
         required: true
         type: string
       mode:
-        description: "Search mode"
+        description: "Tipe query"
         required: true
+        default: keyword
         type: choice
         options:
           - keyword
           - hashtag
           - profile
-        default: keyword
+      qualifier:
+        description: "Konteks tambahan untuk filter hasil (opsional — contoh: Gojek founder)"
+        required: false
+        default: ""
+        type: string
       period_days:
-        description: "Days of data to retrieve"
-        required: true
+        description: "Rentang waktu"
+        required: false
+        default: "7"
         type: choice
         options:
           - "7"
           - "14"
           - "30"
-        default: "7"
       max_videos:
-        description: "Max videos per query"
-        required: true
+        description: "Maks video yang di-scrape"
+        required: false
+        default: "200"
         type: choice
         options:
           - "100"
           - "200"
           - "300"
           - "500"
-        default: "200"
-
-permissions:
-  contents: write
 
 jobs:
-  run-pipeline:
+  research:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    permissions:
+      contents: write
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -57,10 +60,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Create data directory
-        run: mkdir -p data
-
-      - name: Scrape TikTok data via Apify
+      - name: Scrape TikTok
         env:
           APIFY_API_TOKEN: ${{ secrets.APIFY_API_TOKEN }}
         run: |
@@ -70,21 +70,27 @@ jobs:
             --period_days "${{ github.event.inputs.period_days }}" \
             --max_videos "${{ github.event.inputs.max_videos }}"
 
-      - name: Analyze metrics
-        run: python src/analyze.py --slug on_demand
+      - name: Analyze
+        run: |
+          python src/analyze.py \
+            --qualifier "${{ github.event.inputs.qualifier }}"
 
-      - name: Generate AI insights
+      - name: Generate insights
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python src/insights.py --slug on_demand
+        run: python src/insights.py
 
-      - name: Build HTML report
-        run: python src/report.py --slug on_demand
-
-      - name: Commit and push report to GitHub Pages
+      - name: Render report
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/index.html
-          git diff --staged --quiet || git commit -m "chore: on-demand report — ${{ github.event.inputs.mode }}=${{ github.event.inputs.query }} [skip ci]"
+          python src/report.py \
+            --query "${{ github.event.inputs.query }}" \
+            --qualifier "${{ github.event.inputs.qualifier }}"
+
+      - name: Commit results
+        run: |
+          git config user.name "trendspy-bot"
+          git config user.email "actions@trendspy"
+          git add reports/ docs/
+          git diff --staged --quiet || \
+            git commit -m "on-demand: ${{ github.event.inputs.query }} ($(date +'%Y-%m-%d'))"
           git push
