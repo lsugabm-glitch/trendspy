@@ -18,12 +18,7 @@ async def on_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["flow"] = "news"
     context.user_data["step"] = STEP_URLS
     await query.edit_message_text(
-        "Paste URL artikel — satu per baris, bisa lebih dari satu:
-
-"
-        "Contoh:
-https://cnnindonesia.com/...
-https://detik.com/..."
+        "Paste URL artikel, satu per baris:\n\nContoh:\nhttps://cnnindonesia.com/..."
     )
 
 
@@ -38,31 +33,27 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["step"] = ""
     msg = await update.message.reply_text(
-        f"⏳ Fetching {len(urls)} artikel dan generating brief..."
+        "Fetching " + str(len(urls)) + " artikel dan generating brief..."
     )
 
     try:
         brief, articles = await news_fetcher.generate_brief(urls)
         failed = [a for a in articles if not a["ok"]]
-        header = f"📰 *News Brief* — {len(articles)} artikel"
+        header = "*News Brief* - " + str(len(articles)) + " artikel"
         if failed:
-            header += f" ({len(failed)} gagal di-fetch)"
+            header += " (" + str(len(failed)) + " gagal di-fetch)"
 
         await msg.edit_text(header, parse_mode="Markdown")
 
         for chunk in _split(brief, 4000):
-            await update.message.reply_text(f"```
-{chunk}
-```", parse_mode="Markdown")
+            await update.message.reply_text("```\n" + chunk + "\n```", parse_mode="Markdown")
 
         if failed:
-            fail_list = "
-".join(f"• {a['url']}" for a in failed)
-            await update.message.reply_text(f"⚠️ Gagal di-fetch:
-{fail_list}")
+            fail_list = "\n".join("- " + a["url"] for a in failed)
+            await update.message.reply_text("Gagal di-fetch:\n" + fail_list)
 
     except Exception as exc:
-        await msg.edit_text(f"❌ Error: {exc}")
+        await msg.edit_text("Error: " + str(exc))
 
 
 def _split(text: str, size: int) -> list:
