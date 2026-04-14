@@ -1,79 +1,69 @@
 """
-bot/news_flow.py — Conversation flow untuk News Brief (inline, tanpa Actions)
+bot/news_flow.py — News brief flow (stateless, uses context.user_data)
 """
 
-from dataclasses import dataclass, field
-from telegram.ext import MessageHandler, filters, ConversationHandler, CallbackQueryHandler
+from telegram import Update
+from telegram.ext import ContextTypes
 
 import news_fetcher
 
-# States
-NEWS_ENTRY = 20
-NEWS_URLS = 21
+STEP_URLS = "news_step_urls"
 
 
-@dataclass
-class NewsHandler:
-    entry: object = None
-    states: dict = field(default_factory=dict)
+async def on_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User clicked Artikel button."""
+    query = update.callback_query
+    await query.answer()
+    context.user_data.clear()
+    context.user_data["flow"] = "news"
+    context.user_data["step"] = STEP_URLS
+    await query.edit_message_text(
+        "Paste URL artikel — satu per baris, bisa lebih dari satu:
+
+"
+        "Contoh:
+https://cnnindonesia.com/...
+https://detik.com/..."
+    )
 
 
-def build_news_handler() -> NewsHandler:
-    h = NewsHandler()
+async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle pasted URLs."""
+    raw = update.message.text.strip()
+    urls = [line.strip() for line in raw.splitlines() if line.strip().startswith("http")]
 
-    async def on_entry(update, context):
-        query = update.callback_query
-        await query.answer()
-        await query.edit_message_text(
-            "Paste URL artikel — satu per baris, bisa lebih dari satu:\n\n"
-            "Contoh:\n"
-            "https://cnnindonesia.com/...\n"
-            "https://detik.com/..."
-        )
-        return NEWS_URLS
+    if not urls:
+        await update.message.reply_text("Tidak ada URL valid. Pastikan diawali https://")
+        return
 
-    async def on_urls(update, context):
-        raw = update.message.text.strip()
-        urls = [line.strip() for line in raw.splitlines() if line.strip().startswith("http")]
+    context.user_data["step"] = ""
+    msg = await update.message.reply_text(
+        f"⏳ Fetching {len(urls)} artikel dan generating brief..."
+    )
 
-        if not urls:
-            await update.message.reply_text("Tidak ada URL valid. Pastikan diawali https://")
-            return NEWS_URLS
+    try:
+        brief, articles = await news_fetcher.generate_brief(urls)
+        failed = [a for a in articles if not a["ok"]]
+        header = f"📰 *News Brief* — {len(articles)} artikel"
+        if failed:
+            header += f" ({len(failed)} gagal di-fetch)"
 
-        msg = await update.message.reply_text(
-            f"⏳ Fetching {len(urls)} artikel dan generating brief..."
-        )
+        await msg.edit_text(header, parse_mode="Markdown")
 
-        try:
-            brief, articles = await news_fetcher.generate_brief(urls)
+        for chunk in _split(brief, 4000):
+            await update.message.reply_text(f"```
+{chunk}
+```", parse_mode="Markdown")
 
-            failed = [a for a in articles if not a["ok"]]
-            header = f"📰 *News Brief* — {len(articles)} artikel"
-            if failed:
-                header += f" ({len(failed)} gagal di-fetch)"
+        if failed:
+            fail_list = "
+".join(f"• {a['url']}" for a in failed)
+            await update.message.reply_text(f"⚠️ Gagal di-fetch:
+{fail_list}")
 
-            await msg.edit_text(header, parse_mode="Markdown")
-
-            # Kirim brief dalam chunks
-            for chunk in _split(brief, 4000):
-                await update.message.reply_text(f"```\n{chunk}\n```", parse_mode="Markdown")
-
-            if failed:
-                fail_list = "\n".join(f"• {a['url']}" for a in failed)
-                await update.message.reply_text(f"⚠️ Gagal di-fetch:\n{fail_list}")
-
-        except Exception as exc:
-            await msg.edit_text(f"❌ Error: {exc}")
-
-        return ConversationHandler.END
-
-    h.entry = on_entry
-    h.states = {
-        NEWS_ENTRY: [],
-        NEWS_URLS: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_urls)],
-    }
-    return h
+    except Exception as exc:
+        await msg.edit_text(f"❌ Error: {exc}")
 
 
-def _split(text: str, size: int) -> list[str]:
-    return [text[i : i + size] for i in range(0, len(text), size)]
+def _split(text: str, size: int) -> list:
+    return [text[i: i + size] for i in range(0, len(text), size)]
