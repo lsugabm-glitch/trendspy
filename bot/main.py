@@ -1,5 +1,5 @@
 """
-bot/main.py — Entry point Telegram bot TrendSpy
+bot/main.py — TrendSpy Telegram bot entry point
 """
 
 import logging
@@ -11,8 +11,8 @@ from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    filters,
     CallbackQueryHandler,
+    filters,
     ContextTypes,
 )
 
@@ -21,68 +21,66 @@ import news_flow
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    level=logging.DEBUG,
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
 MAIN_MENU = InlineKeyboardMarkup([
     [
-        InlineKeyboardButton("🔍 TikTok", callback_data="type_tiktok"),
-        InlineKeyboardButton("📰 Artikel", callback_data="type_news"),
+        InlineKeyboardButton("TikTok", callback_data="type_tiktok"),
+        InlineKeyboardButton("Artikel", callback_data="type_news"),
     ]
 ])
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("START command from user %s", update.effective_user.id)
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.clear()
+    context.user_data["state"] = "idle"
     await update.message.reply_text("Halo! Mau riset apa?", reply_markup=MAIN_MENU)
 
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = update.callback_query.data
-    user_id = update.effective_user.id
-    logger.info("CALLBACK from user %s: data=%s", user_id, data)
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    data = query.data
+    state = context.user_data.get("state", "idle")
+    logger.info("CALLBACK user=%s data=%s state=%s", update.effective_user.id, data, state)
 
     if data == "type_tiktok":
-        await tiktok_flow.on_entry(update, context)
+        await tiktok_flow.handle_type_tiktok(update, context)
     elif data == "type_news":
-        await news_flow.on_entry(update, context)
+        await news_flow.handle_type_news(update, context)
     elif data.startswith("mode_"):
-        await tiktok_flow.on_mode(update, context)
+        await tiktok_flow.handle_mode(update, context)
     else:
-        await update.callback_query.answer()
+        await query.answer()
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    step = context.user_data.get("step", "")
-    user_id = update.effective_user.id
-    logger.info("MESSAGE from user %s: step=%s text=%s", user_id, step, update.message.text[:30])
+async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = context.user_data.get("state", "idle")
+    logger.info("MESSAGE user=%s state=%s text=%r", update.effective_user.id, state, update.message.text[:40])
 
-    if step in (tiktok_flow.STEP_QUERY, tiktok_flow.STEP_QUALIFIER):
-        await tiktok_flow.on_message(update, context)
-    elif step == news_flow.STEP_URLS:
-        await news_flow.on_message(update, context)
+    if state in ("enter_query", "enter_qualifier"):
+        await tiktok_flow.handle_text(update, context)
+    elif state == "enter_urls":
+        await news_flow.handle_urls(update, context)
     else:
-        await update.message.reply_text(
-            "Ketik /start untuk mulai.", reply_markup=MAIN_MENU
-        )
+        await update.message.reply_text("Ketik /start untuk mulai.", reply_markup=MAIN_MENU)
 
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("Unhandled exception:\n%s", traceback.format_exc())
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error("Exception:\n%s", traceback.format_exc())
 
 
-def main():
+def main() -> None:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     app = Application.builder().token(token).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(error_handler)
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+    app.add_error_handler(on_error)
 
-    logger.info("Bot berjalan... instance_id=%s", os.getpid())
+    logger.info("Bot started (pid=%s)", os.getpid())
     app.run_polling(drop_pending_updates=True)
 
 
