@@ -4,12 +4,20 @@ bot/main.py — Entry point Telegram bot TrendSpy
 
 import logging
 import os
+import traceback
 
-from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import Application, CommandHandler, ConversationHandler, MessageHandler, filters, CallbackQueryHandler
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    CallbackQueryHandler,
+    ContextTypes,
+)
 
-from tiktok_flow import build_tiktok_handler
-from news_flow import build_news_handler, NEWS_ENTRY
+import tiktok_flow
+import news_flow
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -17,66 +25,58 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Top-level states
-CHOOSE_TYPE = 0
-
-
-async def start(update, context):
-    keyboard = [
-        [
-            InlineKeyboardButton("🔍 TikTok", callback_data="type_tiktok"),
-            InlineKeyboardButton("📰 Artikel", callback_data="type_news"),
-        ]
+MAIN_MENU = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("🔍 TikTok", callback_data="type_tiktok"),
+        InlineKeyboardButton("📰 Artikel", callback_data="type_news"),
     ]
-    # Handle both message and callback_query entry points
-    if update.callback_query:
+])
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("Halo! Mau riset apa?", reply_markup=MAIN_MENU)
+
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = update.callback_query.data
+
+    if data == "type_tiktok":
+        await tiktok_flow.on_entry(update, context)
+    elif data == "type_news":
+        await news_flow.on_entry(update, context)
+    elif data.startswith("mode_"):
+        await tiktok_flow.on_mode(update, context)
+    else:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(
-            "Halo! Mau riset apa?",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    step = context.user_data.get("step", "")
+
+    if step in (tiktok_flow.STEP_QUERY, tiktok_flow.STEP_QUALIFIER):
+        await tiktok_flow.on_message(update, context)
+    elif step == news_flow.STEP_URLS:
+        await news_flow.on_message(update, context)
     else:
         await update.message.reply_text(
-            "Halo! Mau riset apa?",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            "Ketik /start untuk mulai.", reply_markup=MAIN_MENU
         )
-    return CHOOSE_TYPE
 
 
-async def cancel(update, context):
-    await update.message.reply_text("Dibatalkan. Ketik /start untuk mulai lagi.")
-    return ConversationHandler.END
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Unhandled exception:\n%s", traceback.format_exc())
 
 
 def main():
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     app = Application.builder().token(token).build()
 
-    tiktok_handler = build_tiktok_handler()
-    news_handler = build_news_handler()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(error_handler)
 
-    conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("start", start),
-            # Also handle button clicks as entry points so the bot works after restarts
-            CallbackQueryHandler(tiktok_handler.entry, pattern="^type_tiktok$"),
-            CallbackQueryHandler(news_handler.entry, pattern="^type_news$"),
-        ],
-        states={
-            CHOOSE_TYPE: [
-                CallbackQueryHandler(tiktok_handler.entry, pattern="^type_tiktok$"),
-                CallbackQueryHandler(news_handler.entry, pattern="^type_news$"),
-            ],
-            **tiktok_handler.states,
-            **news_handler.states,
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        per_user=True,
-        per_chat=False,
-        allow_reentry=True,
-    )
-
-    app.add_handler(conv)
     logger.info("Bot berjalan...")
     app.run_polling()
 
