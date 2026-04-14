@@ -5,6 +5,7 @@ bot/main.py — Entry point Telegram bot TrendSpy
 import logging
 import os
 
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, ConversationHandler, MessageHandler, filters, CallbackQueryHandler
 
 from tiktok_flow import build_tiktok_handler
@@ -23,15 +24,22 @@ CHOOSE_TYPE = 0
 async def start(update, context):
     keyboard = [
         [
-            {"text": "🔍 TikTok", "callback_data": "type_tiktok"},
-            {"text": "📰 Artikel", "callback_data": "type_news"},
+            InlineKeyboardButton("🔍 TikTok", callback_data="type_tiktok"),
+            InlineKeyboardButton("📰 Artikel", callback_data="type_news"),
         ]
     ]
-    from telegram import InlineKeyboardMarkup
-    await update.message.reply_text(
-        "Halo! Mau riset apa?",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+    # Handle both message and callback_query entry points
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
+            "Halo! Mau riset apa?",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    else:
+        await update.message.reply_text(
+            "Halo! Mau riset apa?",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
     return CHOOSE_TYPE
 
 
@@ -48,7 +56,12 @@ def main():
     news_handler = build_news_handler()
 
     conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            CommandHandler("start", start),
+            # Also handle button clicks as entry points so the bot works after restarts
+            CallbackQueryHandler(tiktok_handler.entry, pattern="^type_tiktok$"),
+            CallbackQueryHandler(news_handler.entry, pattern="^type_news$"),
+        ],
         states={
             CHOOSE_TYPE: [
                 CallbackQueryHandler(tiktok_handler.entry, pattern="^type_tiktok$"),
@@ -60,6 +73,7 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
         per_user=True,
         per_chat=False,
+        allow_reentry=True,
     )
 
     app.add_handler(conv)
