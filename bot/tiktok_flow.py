@@ -1,21 +1,17 @@
 """
-bot/tiktok_flow.py — TikTok research flow (stateless, uses context.user_data)
+bot/tiktok_flow.py — TikTok research flow handlers
+State machine via context.user_data["state"]:
+  idle -> choose_mode -> enter_query -> (enter_qualifier ->) done
 """
+
+import logging
 
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from telegram.ext import ContextTypes
 
 import github_actions
 
-STEP_MODE = "tiktok_step_mode"
-STEP_QUERY = "tiktok_step_query"
-STEP_QUALIFIER = "tiktok_step_qualifier"
-
-MODE_LABELS = {
-    "keyword": "keyword",
-    "hashtag": "hashtag (tanpa #)",
-    "profile": "username TikTok (tanpa @)",
-}
+logger = logging.getLogger(__name__)
 
 MODE_KEYBOARD = InlineKeyboardMarkup([
     [
@@ -25,58 +21,77 @@ MODE_KEYBOARD = InlineKeyboardMarkup([
     ]
 ])
 
+MODE_LABELS = {
+    "keyword": "keyword",
+    "hashtag": "hashtag (tanpa #)",
+    "profile": "username TikTok (tanpa @)",
+}
 
-async def on_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User clicked TikTok button."""
+
+async def handle_type_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """User tapped the TikTok button from the main menu."""
     query = update.callback_query
     await query.answer()
     context.user_data.clear()
-    context.user_data["flow"] = "tiktok"
-    context.user_data["step"] = STEP_MODE
+    context.user_data["state"] = "choose_mode"
     await query.edit_message_text("Tipe query?", reply_markup=MODE_KEYBOARD)
 
 
-async def on_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User clicked a mode button (keyword/hashtag/profile)."""
+async def handle_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """User tapped Keyword / Hashtag / Profil."""
     query = update.callback_query
     await query.answer()
+
+    if context.user_data.get("state") != "choose_mode":
+        # Stale button — restart gracefully
+        context.user_data.clear()
+        context.user_data["state"] = "choose_mode"
+        await query.edit_message_text("Tipe query?", reply_markup=MODE_KEYBOARD)
+        return
+
     mode = query.data.replace("mode_", "")
-    context.user_data["tiktok_mode"] = mode
-    context.user_data["step"] = STEP_QUERY
+    context.user_data["mode"] = mode
+    context.user_data["state"] = "enter_query"
     label = MODE_LABELS.get(mode, mode)
     await query.edit_message_text("Masukkan " + label + ":")
 
 
-async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle text messages for query and qualifier steps."""
-    step = context.user_data.get("step")
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle text input for enter_query and enter_qualifier states."""
+    state = context.user_data.get("state")
     text = update.message.text.strip()
 
-    if step == STEP_QUERY:
-        context.user_data["tiktok_query"] = text
-        mode = context.user_data.get("tiktok_mode")
+    if state == "enter_query":
+        context.user_data["query"] = text
+        mode = context.user_data.get("mode")
         if mode == "keyword":
-            context.user_data["step"] = STEP_QUALIFIER
+            context.user_data["state"] = "enter_qualifier"
             await update.message.reply_text(
-                "Tambah konteks? Opsional.\nKetik konteks atau /skip",
-                parse_mode="Markdown",
+                "Tambah konteks? Opsional, bantu filter hasil.\n"
+                "Ketik konteks atau kirim /skip"
             )
         else:
-            await _run(update, context, qualifier="")
+            await _trigger_and_report(update, context, qualifier="")
 
-    elif step == STEP_QUALIFIER:
-        qualifier = "" if text.startswith("/skip") else text
-        await _run(update, context, qualifier=qualifier)
+    elif state == "enter_qualifier":
+        qualifier = "" if text.lower().startswith("/skip") else text
+        await _trigger_and_report(update, context, qualifier=qualifier)
 
 
-async def _run(update: Update, context: ContextTypes.DEFAULT_TYPE, qualifier: str):
-    context.user_data["step"] = ""
-    query_text = context.user_data.get("tiktok_query", "")
-    mode = context.user_data.get("tiktok_mode", "keyword")
+async def _trigger_and_report(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    qualifier: str,
+) -> None:
+    """Trigger GitHub Actions workflow and send back the report."""
+    context.user_data["state"] = "idle"
+    query_text = context.user_data.get("query", "")
+    mode = context.user_data.get("mode", "keyword")
 
     label = "`" + query_text + "`"
     if qualifier:
         label += " (konteks: _" + qualifier + "_)"
+
     msg = await update.message.reply_text(
         "Memproses " + label + "... Biasanya 3-5 menit.",
         parse_mode="Markdown",
@@ -84,28 +99,36 @@ async def _run(update: Update, context: ContextTypes.DEFAULT_TYPE, qualifier: st
 
     try:
         trigger_time = await github_actions.trigger_workflow(
-            query=query_text, mode=mode, qualifier=qualifier
+            query=query_text,
+            mode=mode,
+            qualifier=qualifier,
         )
         run = await github_actions.poll_run(trigger_time)
 
         if run is None or run.get("conclusion") != "success":
-            await msg.edit_text("Workflow gagal atau timeout. Cek tab Actions di GitHub.")
+            await msg.edit_text(
+                "Workflow gagal atau timeout. Cek tab Actions di GitHub."
+            )
             return
 
         await msg.edit_text("Selesai! Mengambil laporan...")
         report = await github_actions.fetch_latest_report()
 
         if not report:
-            await msg.edit_text("Laporan tidak ditemukan.")
+            await msg.edit_text("Laporan tidak ditemukan di folder reports/.")
             return
 
         await msg.delete()
-        for chunk in _split(report, 4000):
-            await update.message.reply_text("```\n" + chunk + "\n```", parse_mode="Markdown")
+        for chunk in _chunks(report, 4000):
+            await update.message.reply_text(
+                "```\n" + chunk + "\n```", parse_mode="Markdown"
+            )
 
     except Exception as exc:
+        logger.exception("Error in _trigger_and_report")
         await msg.edit_text("Error: " + str(exc))
 
 
-def _split(text: str, size: int) -> list:
-    return [text[i: i + size] for i in range(0, len(text), size)]
+def _chunks(text: str, size: int):
+    for i in range(0, len(text), size):
+        yield text[i: i + size]
