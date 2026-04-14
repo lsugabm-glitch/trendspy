@@ -1,132 +1,114 @@
 """
-bot/tiktok_flow.py — Conversation flow untuk TikTok on-demand research
+bot/tiktok_flow.py — TikTok research flow (stateless, uses context.user_data)
 """
 
-from dataclasses import dataclass, field
-from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import CallbackQueryHandler, MessageHandler, filters, ConversationHandler
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
+from telegram.ext import ContextTypes
 
 import github_actions
 
-# States (angka unik, tidak overlap dengan main.py)
-TIKTOK_MODE = 10
-TIKTOK_QUERY = 11
-TIKTOK_QUALIFIER = 12
+STEP_MODE = "tiktok_step_mode"
+STEP_QUERY = "tiktok_step_query"
+STEP_QUALIFIER = "tiktok_step_qualifier"
+
+MODE_LABELS = {
+    "keyword": "keyword",
+    "hashtag": "hashtag (tanpa #)",
+    "profile": "username TikTok (tanpa @)",
+}
+
+MODE_KEYBOARD = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("🔤 Keyword", callback_data="mode_keyword"),
+        InlineKeyboardButton("#️⃣ Hashtag", callback_data="mode_hashtag"),
+        InlineKeyboardButton("👤 Profil", callback_data="mode_profile"),
+    ]
+])
 
 
-@dataclass
-class TikTokHandler:
-    entry: object = None
-    states: dict = field(default_factory=dict)
+async def on_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User clicked TikTok button."""
+    query = update.callback_query
+    await query.answer()
+    context.user_data.clear()
+    context.user_data["flow"] = "tiktok"
+    context.user_data["step"] = STEP_MODE
+    await query.edit_message_text("Tipe query?", reply_markup=MODE_KEYBOARD)
 
 
-def build_tiktok_handler() -> TikTokHandler:
-    h = TikTokHandler()
+async def on_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User clicked a mode button (keyword/hashtag/profile)."""
+    query = update.callback_query
+    await query.answer()
+    mode = query.data.replace("mode_", "")
+    context.user_data["tiktok_mode"] = mode
+    context.user_data["step"] = STEP_QUERY
+    label = MODE_LABELS.get(mode, mode)
+    await query.edit_message_text(f"Masukkan {label}:")
 
-    async def on_entry(update, context):
-        query = update.callback_query
-        await query.answer()
-        keyboard = [
-            [
-                InlineKeyboardButton("🔤 Keyword", callback_data="mode_keyword"),
-                InlineKeyboardButton("#️⃣ Hashtag", callback_data="mode_hashtag"),
-                InlineKeyboardButton("👤 Profil", callback_data="mode_profile"),
-            ]
-        ]
-        await query.edit_message_text(
-            "Tipe query?",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return TIKTOK_MODE
 
-    async def on_mode(update, context):
-        query = update.callback_query
-        await query.answer()
-        mode = query.data.replace("mode_", "")
-        context.user_data["tiktok_mode"] = mode
+async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle text messages for query and qualifier steps."""
+    step = context.user_data.get("step")
+    text = update.message.text.strip()
 
-        labels = {"keyword": "keyword", "hashtag": "hashtag (tanpa #)", "profile": "username TikTok (tanpa @)"}
-        await query.edit_message_text(f"Masukkan {labels[mode]}:")
-        return TIKTOK_QUERY
-
-    async def on_query(update, context):
-        raw = update.message.text.strip()
-        context.user_data["tiktok_query"] = raw
+    if step == STEP_QUERY:
+        context.user_data["tiktok_query"] = text
         mode = context.user_data.get("tiktok_mode")
-
         if mode == "keyword":
+            context.user_data["step"] = STEP_QUALIFIER
             await update.message.reply_text(
                 "Tambah konteks? Opsional — bantu filter hasil lebih relevan.\n"
                 "Contoh: kalau keyword *Nadiem*, konteks bisa *Gojek founder*\n\n"
-                "Ketik konteks atau kirim /skip",
+                "Ketik konteks atau /skip",
                 parse_mode="Markdown",
             )
-            return TIKTOK_QUALIFIER
         else:
-            # Hashtag dan profil tidak perlu qualifier
-            await _run_tiktok(update, context, qualifier="")
-            return ConversationHandler.END
+            await _run(update, context, qualifier="")
 
-    async def on_qualifier(update, context):
-        qualifier = update.message.text.strip()
-        if qualifier.startswith("/skip"):
-            qualifier = ""
-        await _run_tiktok(update, context, qualifier=qualifier)
-        return ConversationHandler.END
+    elif step == STEP_QUALIFIER:
+        qualifier = "" if text.startswith("/skip") else text
+        await _run(update, context, qualifier=qualifier)
 
-    async def on_skip(update, context):
-        await _run_tiktok(update, context, qualifier="")
-        return ConversationHandler.END
 
-    async def _run_tiktok(update, context, qualifier: str):
-        query = context.user_data.get("tiktok_query", "")
-        mode = context.user_data.get("tiktok_mode", "keyword")
+async def _run(update: Update, context: ContextTypes.DEFAULT_TYPE, qualifier: str):
+    context.user_data["step"] = ""
+    query_text = context.user_data.get("tiktok_query", "")
+    mode = context.user_data.get("tiktok_mode", "keyword")
 
-        label = f"`{query}`" + (f" (konteks: _{qualifier}_)" if qualifier else "")
-        msg = await update.message.reply_text(
-            f"⏳ Memproses {label}...\nBiasanya 3–5 menit.",
-            parse_mode="Markdown",
+    label = f"`{query_text}`" + (f" (konteks: _{qualifier}_)" if qualifier else "")
+    msg = await update.message.reply_text(
+        f"⏳ Memproses {label}...
+Biasanya 3–5 menit.",
+        parse_mode="Markdown",
+    )
+
+    try:
+        trigger_time = await github_actions.trigger_workflow(
+            query=query_text, mode=mode, qualifier=qualifier
         )
+        run = await github_actions.poll_run(trigger_time)
 
-        try:
-            trigger_time = await github_actions.trigger_workflow(
-                query=query,
-                mode=mode,
-                qualifier=qualifier,
-            )
+        if run is None or run.get("conclusion") != "success":
+            await msg.edit_text("❌ Workflow gagal atau timeout. Cek tab Actions di GitHub.")
+            return
 
-            run = await github_actions.poll_run(trigger_time)
+        await msg.edit_text("✅ Selesai! Mengambil laporan...")
+        report = await github_actions.fetch_latest_report()
 
-            if run is None or run.get("conclusion") != "success":
-                await msg.edit_text("❌ Workflow gagal atau timeout. Cek tab Actions di GitHub.")
-                return
+        if not report:
+            await msg.edit_text("⚠️ Laporan tidak ditemukan.")
+            return
 
-            await msg.edit_text("✅ Selesai! Mengambil laporan...")
-            report = await github_actions.fetch_latest_report()
+        await msg.delete()
+        for chunk in _split(report, 4000):
+            await update.message.reply_text(f"```
+{chunk}
+```", parse_mode="Markdown")
 
-            if not report:
-                await msg.edit_text("⚠️ Laporan tidak ditemukan. Cek folder `reports/` di GitHub.")
-                return
-
-            # Telegram max 4096 char per pesan
-            await msg.delete()
-            for chunk in _split(report, 4000):
-                await update.message.reply_text(f"```\n{chunk}\n```", parse_mode="Markdown")
-
-        except Exception as exc:
-            await msg.edit_text(f"❌ Error: {exc}")
-
-    h.entry = on_entry
-    h.states = {
-        TIKTOK_MODE: [CallbackQueryHandler(on_mode, pattern="^mode_")],
-        TIKTOK_QUERY: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_query)],
-        TIKTOK_QUALIFIER: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, on_qualifier),
-            MessageHandler(filters.Regex(r"^/skip$"), on_skip),
-        ],
-    }
-    return h
+    except Exception as exc:
+        await msg.edit_text(f"❌ Error: {exc}")
 
 
-def _split(text: str, size: int) -> list[str]:
-    return [text[i : i + size] for i in range(0, len(text), size)]
+def _split(text: str, size: int) -> list:
+    return [text[i: i + size] for i in range(0, len(text), size)]
