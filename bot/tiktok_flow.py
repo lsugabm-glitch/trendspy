@@ -19,9 +19,9 @@ MODE_LABELS = {
 
 MODE_KEYBOARD = InlineKeyboardMarkup([
     [
-        InlineKeyboardButton("🔤 Keyword", callback_data="mode_keyword"),
-        InlineKeyboardButton("#️⃣ Hashtag", callback_data="mode_hashtag"),
-        InlineKeyboardButton("👤 Profil", callback_data="mode_profile"),
+        InlineKeyboardButton("Keyword", callback_data="mode_keyword"),
+        InlineKeyboardButton("Hashtag", callback_data="mode_hashtag"),
+        InlineKeyboardButton("Profil", callback_data="mode_profile"),
     ]
 ])
 
@@ -44,7 +44,7 @@ async def on_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["tiktok_mode"] = mode
     context.user_data["step"] = STEP_QUERY
     label = MODE_LABELS.get(mode, mode)
-    await query.edit_message_text(f"Masukkan {label}:")
+    await query.edit_message_text("Masukkan " + label + ":")
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -58,9 +58,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if mode == "keyword":
             context.user_data["step"] = STEP_QUALIFIER
             await update.message.reply_text(
-                "Tambah konteks? Opsional — bantu filter hasil lebih relevan.\n"
-                "Contoh: kalau keyword *Nadiem*, konteks bisa *Gojek founder*\n\n"
-                "Ketik konteks atau /skip",
+                "Tambah konteks? Opsional.\nKetik konteks atau /skip",
                 parse_mode="Markdown",
             )
         else:
@@ -76,10 +74,11 @@ async def _run(update: Update, context: ContextTypes.DEFAULT_TYPE, qualifier: st
     query_text = context.user_data.get("tiktok_query", "")
     mode = context.user_data.get("tiktok_mode", "keyword")
 
-    label = f"`{query_text}`" + (f" (konteks: _{qualifier}_)" if qualifier else "")
+    label = "`" + query_text + "`"
+    if qualifier:
+        label += " (konteks: _" + qualifier + "_)"
     msg = await update.message.reply_text(
-        f"⏳ Memproses {label}...
-Biasanya 3–5 menit.",
+        "Memproses " + label + "... Biasanya 3-5 menit.",
         parse_mode="Markdown",
     )
 
@@ -90,24 +89,22 @@ Biasanya 3–5 menit.",
         run = await github_actions.poll_run(trigger_time)
 
         if run is None or run.get("conclusion") != "success":
-            await msg.edit_text("❌ Workflow gagal atau timeout. Cek tab Actions di GitHub.")
+            await msg.edit_text("Workflow gagal atau timeout. Cek tab Actions di GitHub.")
             return
 
-        await msg.edit_text("✅ Selesai! Mengambil laporan...")
+        await msg.edit_text("Selesai! Mengambil laporan...")
         report = await github_actions.fetch_latest_report()
 
         if not report:
-            await msg.edit_text("⚠️ Laporan tidak ditemukan.")
+            await msg.edit_text("Laporan tidak ditemukan.")
             return
 
         await msg.delete()
         for chunk in _split(report, 4000):
-            await update.message.reply_text(f"```
-{chunk}
-```", parse_mode="Markdown")
+            await update.message.reply_text("```\n" + chunk + "\n```", parse_mode="Markdown")
 
     except Exception as exc:
-        await msg.edit_text(f"❌ Error: {exc}")
+        await msg.edit_text("Error: " + str(exc))
 
 
 def _split(text: str, size: int) -> list:
