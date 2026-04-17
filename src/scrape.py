@@ -8,6 +8,7 @@ to the data/ directory.
 Usage:
     python src/scrape.py                                         # multi-report mode
     python src/scrape.py --query "#hashtag" --mode hashtag       # on-demand single query
+    python src/scrape.py --from_plan                             # from AI-generated plan
 
 Required env vars:
     APIFY_API_TOKEN
@@ -54,6 +55,15 @@ def get_reports(config: dict) -> list[dict]:
         "max_videos_per_keyword": config.get("max_videos_per_keyword", 300),
         "period_days": config.get("period_days", 7),
     }]
+
+
+def latest_plan() -> Path:
+    """Find the most recent plan_*.json file."""
+    files = sorted(DATA_DIR.glob("plan_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
+        print("ERROR: No plan_*.json found in data/. Run plan.py first.", file=sys.stderr)
+        sys.exit(1)
+    return files[0]
 
 
 def run_actor(client: ApifyClient, search_type: str, query: str, max_items: int) -> list[dict]:
@@ -204,6 +214,35 @@ def scrape_report(client: ApifyClient, report_cfg: dict, timestamp: str) -> Path
     return combined_path
 
 
+def scrape_from_plan() -> Path:
+    """Load the latest AI-generated plan and scrape accordingly."""
+    plan_path = latest_plan()
+    print(f"[scrape] Loading plan from {plan_path.name}")
+    plan = json.loads(plan_path.read_text())
+
+    # Convert the plan into the same report_cfg format that scrape_report() expects
+    report_cfg = {
+        "name": "on_demand",
+        "keywords": plan.get("keywords", []),
+        "hashtags": plan.get("hashtags", []),
+        "profiles": plan.get("profiles", []),
+        "max_videos_per_keyword": plan.get("max_videos_per_query", 200),
+        "period_days": plan.get("period_days", 14),
+    }
+
+    print(f"[scrape] Plan → keywords={report_cfg['keywords']}, "
+          f"hashtags={report_cfg['hashtags']}, profiles={report_cfg['profiles']}")
+
+    api_token = os.environ.get("APIFY_API_TOKEN")
+    if not api_token:
+        print("ERROR: APIFY_API_TOKEN not set.", file=sys.stderr)
+        sys.exit(1)
+
+    client = ApifyClient(api_token)
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    return scrape_report(client, report_cfg, timestamp)
+
+
 def scrape_all() -> list[Path]:
     """Scrape all reports from config (scheduled mode)."""
     api_token = os.environ.get("APIFY_API_TOKEN")
@@ -265,9 +304,12 @@ if __name__ == "__main__":
     parser.add_argument("--mode", choices=["keyword", "hashtag", "profile"], default="keyword")
     parser.add_argument("--period_days", type=int, default=None)
     parser.add_argument("--max_videos", type=int, default=None)
+    parser.add_argument("--from_plan", action="store_true", help="Load scraping plan from latest plan_*.json")
     args = parser.parse_args()
 
-    if args.query:
+    if args.from_plan:
+        scrape_from_plan()
+    elif args.query:
         scrape_single(args.query, args.mode, args.period_days, args.max_videos)
     else:
         scrape_all()
