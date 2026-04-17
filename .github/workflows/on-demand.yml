@@ -1,96 +1,94 @@
-name: 🔍 On-Demand TikTok Research
+name: On-Demand TikTok Research
 
 on:
   workflow_dispatch:
     inputs:
-      query:
-        description: "Keyword, #hashtag, atau @profile"
+      brief:
+        description: "Research brief — describe what you want to know (Bahasa Indonesia or English, 1-3 sentences)"
         required: true
-        type: string
-      mode:
-        description: "Tipe query"
-        required: true
-        default: keyword
-        type: choice
-        options:
-          - keyword
-          - hashtag
-          - profile
-      qualifier:
-        description: "Konteks tambahan untuk filter hasil (opsional — contoh: Gojek founder)"
-        required: false
-        default: ""
         type: string
       period_days:
-        description: "Rentang waktu"
+        description: "Time window (days) — leave blank to let the planner decide"
         required: false
-        default: "7"
         type: choice
         options:
+          - ""
           - "7"
           - "14"
           - "30"
+        default: ""
       max_videos:
-        description: "Maks video yang di-scrape"
+        description: "Max videos per query — leave blank to let the planner decide"
         required: false
-        default: "200"
         type: choice
         options:
+          - ""
           - "100"
           - "200"
           - "300"
-          - "500"
+        default: ""
+      dry_run:
+        description: "Dry run — only generate the plan, don't scrape"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   research:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: pip
+          python-version: "3.12"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Scrape TikTok
-        env:
-          APIFY_API_TOKEN: ${{ secrets.APIFY_API_TOKEN }}
-        run: |
-          python src/scrape.py \
-            --query "${{ github.event.inputs.query }}" \
-            --mode "${{ github.event.inputs.mode }}" \
-            --period_days "${{ github.event.inputs.period_days }}" \
-            --max_videos "${{ github.event.inputs.max_videos }}"
-
-      - name: Analyze
-        run: |
-          python src/analyze.py \
-            --qualifier "${{ github.event.inputs.qualifier }}"
-
-      - name: Generate insights
+      - name: Generate scraping plan
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python src/insights.py
-
-      - name: Render report
+          BRIEF: ${{ inputs.brief }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          python src/report.py \
-            --query "${{ github.event.inputs.query }}" \
-            --qualifier "${{ github.event.inputs.qualifier }}"
+          ARGS=""
+          if [ -n "${{ inputs.period_days }}" ]; then
+            ARGS="$ARGS --period_days ${{ inputs.period_days }}"
+          fi
+          if [ -n "${{ inputs.max_videos }}" ]; then
+            ARGS="$ARGS --max_videos ${{ inputs.max_videos }}"
+          fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry_run"
+          fi
+          python src/plan.py $ARGS
 
-      - name: Commit results
+      - name: Scrape TikTok
+        if: ${{ inputs.dry_run == false }}
+        env:
+          APIFY_API_TOKEN: ${{ secrets.APIFY_API_TOKEN }}
+        run: python src/scrape.py --from_plan
+
+      - name: Analyze
+        if: ${{ inputs.dry_run == false }}
+        run: python src/analyze.py --slug on_demand
+
+      - name: Generate insights
+        if: ${{ inputs.dry_run == false }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python src/insights.py --from_plan
+
+      - name: Build report
+        if: ${{ inputs.dry_run == false }}
+        run: python src/report.py --slug on_demand
+
+      - name: Commit report
+        if: ${{ inputs.dry_run == false }}
         run: |
-          git config user.name "trendspy-bot"
-          git config user.email "actions@trendspy"
-          git add reports/ docs/
-          git diff --staged --quiet || \
-            git commit -m "on-demand: ${{ github.event.inputs.query }} ($(date +'%Y-%m-%d'))"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/index.html
+          git diff --staged --quiet || git commit -m "Report: ${{ inputs.brief }}"
           git push
