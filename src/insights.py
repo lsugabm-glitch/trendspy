@@ -8,6 +8,7 @@ data/insights_*.json.
 Usage:
     python src/insights.py                     # multi-report mode (reads config)
     python src/insights.py --slug on_demand    # single slug mode
+    python src/insights.py --from_plan         # reads research brief from plan
 
 Required env vars:
     ANTHROPIC_API_KEY
@@ -78,6 +79,15 @@ def latest(pattern: str) -> Path:
     return files[0]
 
 
+def latest_plan() -> Path:
+    """Find the most recent plan_*.json file."""
+    files = sorted(DATA_DIR.glob("plan_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
+        print("ERROR: No plan_*.json found in data/. Run plan.py first.", file=sys.stderr)
+        sys.exit(1)
+    return files[0]
+
+
 def fmt_num(n: int | float | None) -> str:
     if n is None:
         return "N/A"
@@ -88,7 +98,7 @@ def fmt_num(n: int | float | None) -> str:
     return str(int(n))
 
 
-def build_prompt(data: dict) -> str:
+def build_prompt(data: dict, research_brief: str | None = None) -> str:
     meta = data["metadata"]
     total = meta["total_videos"]
     total_views = fmt_num(meta["total_views"])
@@ -100,7 +110,20 @@ def build_prompt(data: dict) -> str:
     top_vel = benchmarks.get("top_video_by_velocity", {})
     top_er_v = benchmarks.get("top_video_by_er", {})
 
-    lines = [
+    lines = []
+
+    # If we have a research brief from the planner, put it right at the top
+    if research_brief:
+        lines += [
+            "## Pertanyaan Riset dari Tim",
+            research_brief,
+            "",
+            "Jawab pertanyaan di atas secara spesifik berdasarkan data berikut. "
+            "Setiap insight harus langsung relevan dengan pertanyaan riset.",
+            "",
+        ]
+
+    lines += [
         f"## Ringkasan Data",
         f"- Tanggal analisis: {analyzed_at}",
         f"- Total video dianalisis: {total:,}",
@@ -203,7 +226,7 @@ def build_prompt(data: dict) -> str:
     return "\n".join(lines)
 
 
-def generate_insights(slug: str) -> Path:
+def generate_insights(slug: str, research_brief: str | None = None) -> Path:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         print("ERROR: ANTHROPIC_API_KEY not set.", file=sys.stderr)
@@ -213,7 +236,7 @@ def generate_insights(slug: str) -> Path:
     print(f"Generating insights from {src.name} (slug={slug})...")
     data = json.loads(src.read_text())
 
-    prompt = build_prompt(data)
+    prompt = build_prompt(data, research_brief=research_brief)
     client = anthropic.Anthropic(api_key=api_key)
 
     message = client.messages.create(
@@ -235,6 +258,7 @@ def generate_insights(slug: str) -> Path:
             "input_tokens": message.usage.input_tokens,
             "output_tokens": message.usage.output_tokens,
             "report_slug": slug,
+            "research_brief": research_brief,
         },
         "insights": ai_text,
     }
@@ -261,9 +285,17 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--slug", default=None, help="Report slug (single-report mode)")
+    parser.add_argument("--from_plan", action="store_true", help="Load research brief from latest plan_*.json")
     args = parser.parse_args()
 
-    if args.slug:
+    if args.from_plan:
+        plan_path = latest_plan()
+        plan = json.loads(plan_path.read_text())
+        brief = plan.get("research_brief", "")
+        print(f"[insights] Loaded research brief from {plan_path.name}")
+        print(f"[insights] Brief: {brief}")
+        generate_insights("on_demand", research_brief=brief)
+    elif args.slug:
         generate_insights(args.slug)
     else:
         generate_all()
